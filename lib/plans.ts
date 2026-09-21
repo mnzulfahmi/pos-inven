@@ -1,14 +1,14 @@
-export type PlanId = "starter" | "pro" | "business";
+export type PlanId = "starter" | "pro" | "business" | "trial";
 export const plans = [
   {
-    id: "starter" as const,
-    name: "Starter",
-    description: "Fondasi yang tepat untuk toko pertama Anda.",
-    price: 99000,
+    id: "trial" as const,
+    name: "Trial",
+    description: "Paket uji coba Rp1.000 untuk verifikasi payment Mayar.",
+    price: 1000,
     outlets: 1,
     members: 2,
     messages: 200,
-    highlight: "Mulai dengan yang penting",
+    highlight: "Untuk pengujian pembayaran",
     features: [
       "Kasir & pencatatan transaksi",
       "Inventori dan pengingat stok",

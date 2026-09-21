@@ -1,22 +1,32 @@
 "use client";
 import Link from "next/link";
 import { useBusiness } from "./business-provider";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
   Building2,
   CalendarDays,
   Check,
+  CheckCircle2,
   ChevronDown,
+  Clock3,
   CreditCard,
   Info,
   Layers3,
+  LoaderCircle,
+  LockKeyhole,
+  Mail,
+  MessageCircle,
   Minus,
+  QrCode,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Store,
+  UserRound,
   Users,
+  XCircle,
 } from "lucide-react";
 import { plans, planFaqs, type Plan } from "@/lib/plans";
 import { money, number } from "@/lib/demo-data";
@@ -42,8 +52,38 @@ const featureRows = [
   { name: "Perbandingan antaroutlet", values: [false, true, true] },
   { name: "Konsolidasi banyak cabang", values: [false, true, true] },
 ];
+
+type PaymentReturn = {
+  invoiceId: string;
+  phase: "checking" | "pending" | "success" | "expired" | "failed";
+  planId?: string;
+  amount?: number;
+  paymentUrl?: string;
+  message: string;
+};
+
+function checkoutErrorMessage(code?: string, fallback?: string) {
+  if (
+    code === "MAYAR_API_KEY_MISSING" ||
+    code === "MAYAR_WEBHOOK_SECRET_MISSING" ||
+    code === "INSFORGE_API_KEY_MISSING"
+  )
+    return "Pembayaran Mayar belum aktif. Hubungi administrator untuk menyelesaikan konfigurasi gateway.";
+  if (code === "PAYMENT_LINK_EXPIRED")
+    return "Tautan pembayaran sebelumnya sudah kedaluwarsa. Klik Bayar dengan Mayar lagi untuk membuat invoice baru.";
+  if (code === "OWNER_REQUIRED" || code === "FORBIDDEN")
+    return "Hanya Owner / Business Owner yang dapat membeli paket.";
+  if (code === "LOGIN_REQUIRED")
+    return "Sesi Anda sudah berakhir. Masuk kembali sebelum melanjutkan pembayaran.";
+  if (code === "MAYAR_UNAUTHORIZED")
+    return "Kredensial pembayaran Mayar tidak valid. Hubungi administrator untuk memperbaiki konfigurasi gateway.";
+  if (code === "REQUEST_FAILED")
+    return fallback || "Checkout Mayar belum dapat dibuat. Coba lagi.";
+  return fallback || "Checkout Mayar belum dapat dibuat. Coba lagi.";
+}
+
 export function Pricing() {
-  const { state } = useBusiness();
+  const { state, refresh } = useBusiness();
   const subscription = state.remote?.subscription;
   const aiLimit =
     subscription?.status === "trial" ? 100 : subscription?.plan?.ai_limit || 0;
@@ -65,13 +105,212 @@ export function Pricing() {
   });
   const [checkoutPending, setCheckoutPending] = useState(false);
   const [checkoutError, setCheckoutError] = useState("");
+  const [paymentReturn, setPaymentReturn] = useState<PaymentReturn | null>(null);
   const checkoutKeys = useRef(new Map<string, string>());
+
+  // QRIS state
+  type PaymentTab = "mayar" | "qris";
+  const [paymentTab, setPaymentTab] = useState<PaymentTab>("mayar");
+  const [qrisState, setQrisState] = useState<{
+    invoiceId: string;
+    qrisImageUrl: string;
+    amount: number;
+    expiresAt: string;
+    phase: "idle" | "loading" | "ready" | "checking" | "paid" | "expired" | "error";
+    message: string;
+  } | null>(null);
+  const qrisPolling = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const qrisActive = useRef(false);
+
+  function stopQrisPolling() {
+    qrisActive.current = false;
+    if (qrisPolling.current) clearTimeout(qrisPolling.current);
+  }
+
+  async function startQrisPoll(invoiceId: string, expiresAt: string) {
+    qrisActive.current = true;
+    let attempts = 0;
+    const poll = async () => {
+      if (!qrisActive.current) return;
+      attempts++;
+      try {
+        const res = await fetch(
+          `/api/billing/qris?invoice=${encodeURIComponent(invoiceId)}`,
+          { cache: "no-store" },
+        );
+        const data = await res.json();
+        if (!qrisActive.current) return;
+        if (["approved", "scheduled"].includes(data.status)) {
+          setQrisState((prev) =>
+            prev ? { ...prev, phase: "paid", message: "Pembayaran QRIS berhasil dikonfirmasi!" } : prev,
+          );
+          void refresh();
+          return;
+        }
+        const expired = expiresAt && Date.parse(expiresAt) <= Date.now();
+        if (expired) {
+          setQrisState((prev) =>
+            prev ? { ...prev, phase: "expired", message: "QR Code sudah kedaluwarsa." } : prev,
+          );
+          return;
+        }
+        if (attempts < 40) {
+          qrisPolling.current = setTimeout(poll, 5000);
+        } else {
+          setQrisState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  phase: "checking",
+                  message: "Sedang menunggu konfirmasi pembayaran…",
+                }
+              : prev,
+          );
+        }
+      } catch {
+        if (qrisActive.current && attempts < 40)
+          qrisPolling.current = setTimeout(poll, 8000);
+      }
+    };
+    await poll();
+  }
+
+  async function generateQris(event: FormEvent) {
+    event.preventDefault();
+    if (!review || planNeedsAdjustment(review) || checkoutPending) return;
+    setCheckoutPending(true);
+    setCheckoutError("");
+    stopQrisPolling();
+    try {
+      const key = checkoutKeys.current.get(review.id + "-qris") || crypto.randomUUID();
+      checkoutKeys.current.set(review.id + "-qris", key);
+      const res = await fetch("/api/billing/qris", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ planId: `${review.id}-v1`, ...billing, key }),
+      });
+      const data = await res.json();
+      if (!res.ok)
+        throw new Error(checkoutErrorMessage(data.code, data.error));
+      setQrisState({
+        invoiceId: data.invoiceId,
+        qrisImageUrl: data.qrisImageUrl,
+        amount: data.amount,
+        expiresAt: data.expiresAt,
+        phase: "ready",
+        message: "Scan QR Code di bawah menggunakan aplikasi pembayaran Anda.",
+      });
+      void startQrisPoll(data.invoiceId, data.expiresAt);
+    } catch (error) {
+      setCheckoutError((error as Error).message);
+    } finally {
+      setCheckoutPending(false);
+    }
+  }
   const askAi = () => {
     if (!pending)
       send("Bantu saya membandingkan paket Starter, Pro, dan Business.");
     window.dispatchEvent(new Event("nusa:open-assistant"));
   };
-  async function selectPlan() {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const invoiceId = params.get("invoice");
+    if (params.get("billing") !== "return" || !invoiceId) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempts = 0;
+    setPaymentReturn({
+      invoiceId,
+      phase: "checking",
+      message: "Memeriksa pembayaran Mayar…",
+    });
+    const check = async () => {
+      attempts += 1;
+      try {
+        const response = await fetch(
+          `/api/billing/mayar?invoice=${encodeURIComponent(invoiceId)}`,
+          { cache: "no-store" },
+        );
+        const result = await response.json();
+        if (!response.ok)
+          throw new Error(
+            checkoutErrorMessage(result.code, result.error),
+          );
+        if (!active) return;
+        const expired =
+          result.expiresAt && Date.parse(result.expiresAt) <= Date.now();
+        if (["approved", "scheduled"].includes(result.status)) {
+          setPaymentReturn({
+            invoiceId,
+            phase: "success",
+            planId: result.planId,
+            amount: result.amount,
+            message:
+              result.status === "scheduled"
+                ? "Pembayaran diterima. Perubahan paket dijadwalkan pada akhir periode berjalan."
+                : "Pembayaran terverifikasi dan paket sudah aktif.",
+          });
+          void refresh();
+          return;
+        }
+        if (expired) {
+          setPaymentReturn({
+            invoiceId,
+            phase: "expired",
+            planId: result.planId,
+            amount: result.amount,
+            message: "Invoice Mayar sudah kedaluwarsa dan belum dibayar.",
+          });
+          return;
+        }
+        if (result.status === "rejected") {
+          setPaymentReturn({
+            invoiceId,
+            phase: "failed",
+            planId: result.planId,
+            amount: result.amount,
+            message: "Pembayaran belum dapat diverifikasi.",
+          });
+          return;
+        }
+        setPaymentReturn({
+          invoiceId,
+          phase: attempts < 10 ? "checking" : "pending",
+          planId: result.planId,
+          amount: result.amount,
+          paymentUrl: result.paymentUrl,
+          message:
+            attempts < 10
+              ? "Pembayaran diterima oleh Mayar dan sedang diverifikasi."
+              : "Verifikasi masih berlangsung. Status akan diperbarui otomatis saat webhook Mayar diterima.",
+        });
+        if (attempts < 10) timer = setTimeout(check, 3000);
+      } catch (error) {
+        if (!active) return;
+        setPaymentReturn({
+          invoiceId,
+          phase: "failed",
+          message: (error as Error).message,
+        });
+      }
+    };
+    void check();
+    return () => {
+      active = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
+
+  function openCheckout(plan: Plan) {
+    setCheckoutError("");
+    setPaymentTab("mayar");
+    setQrisState(null);
+    stopQrisPolling();
+    setReview(plan);
+  }
+
+  async function selectPlan(event: FormEvent) {
+    event.preventDefault();
     if (!review || planNeedsAdjustment(review) || checkoutPending) return;
     setCheckoutPending(true);
     setCheckoutError("");
@@ -88,8 +327,11 @@ export function Pricing() {
         }),
       });
       const result = await response.json();
-      if (!response.ok)
-        throw new Error(result.error || "Gagal membuat pembayaran Mayar.");
+      if (!response.ok) {
+        if (result.code === "PAYMENT_LINK_EXPIRED")
+          checkoutKeys.current.delete(review.id);
+        throw new Error(checkoutErrorMessage(result.code, result.error));
+      }
       notify("Invoice dibuat. Anda akan diarahkan ke pembayaran Mayar.");
       window.location.assign(result.checkoutUrl);
     } catch (error) {
@@ -112,6 +354,81 @@ export function Pricing() {
           Bantu pilih paket
         </button>
       </div>
+      {paymentReturn && (
+        <section
+          className={`payment-return payment-return-${paymentReturn.phase}`}
+          aria-live="polite"
+        >
+          <span className="payment-return-icon">
+            {paymentReturn.phase === "success" ? (
+              <CheckCircle2 size={24} />
+            ) : paymentReturn.phase === "checking" ? (
+              <LoaderCircle className="payment-spin" size={24} />
+            ) : paymentReturn.phase === "pending" ? (
+              <Clock3 size={24} />
+            ) : (
+              <XCircle size={24} />
+            )}
+          </span>
+          <div>
+            <span>STATUS PEMBAYARAN MAYAR</span>
+            <strong>
+              {paymentReturn.phase === "success"
+                ? "Pembayaran selesai"
+                : paymentReturn.phase === "checking"
+                  ? "Sedang memverifikasi"
+                  : paymentReturn.phase === "pending"
+                    ? "Menunggu webhook Mayar"
+                    : paymentReturn.phase === "expired"
+                      ? "Invoice kedaluwarsa"
+                      : "Pembayaran perlu diperiksa"}
+            </strong>
+            <p>{paymentReturn.message}</p>
+            <small>
+              Invoice {paymentReturn.invoiceId.slice(0, 8).toUpperCase()}
+              {paymentReturn.amount
+                ? ` · ${money(paymentReturn.amount)}`
+                : ""}
+            </small>
+          </div>
+          <div className="payment-return-actions">
+            {paymentReturn.paymentUrl &&
+              ["checking", "pending"].includes(paymentReturn.phase) && (
+                <a
+                  className="button secondary compact"
+                  href={paymentReturn.paymentUrl}
+                >
+                  Lanjutkan pembayaran <ArrowUpRight size={14} />
+                </a>
+              )}
+            {paymentReturn.phase === "success" && (
+              <Link className="button secondary compact" href="/settings">
+                Lihat invoice <ArrowRight size={14} />
+              </Link>
+            )}
+            {paymentReturn.phase === "pending" && (
+              <button
+                type="button"
+                className="button ghost compact"
+                onClick={() => window.location.reload()}
+              >
+                <RefreshCw size={14} /> Periksa lagi
+              </button>
+            )}
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Tutup status pembayaran"
+              onClick={() => {
+                setPaymentReturn(null);
+                window.history.replaceState({}, "", "/pricing");
+              }}
+            >
+              <XCircle size={18} />
+            </button>
+          </div>
+        </section>
+      )}
       <section
         className="subscription-overview"
         aria-label="Langganan saat ini"
@@ -220,7 +537,7 @@ export function Pricing() {
               </p>
               <button
                 className={`button ${plan.id === "pro" ? "primary" : "secondary"} plan-select`}
-                onClick={() => setReview(plan)}
+                onClick={() => openCheckout(plan)}
               >
                 {`Pilih ${plan.name}`}
                 <ArrowRight size={16} />
@@ -281,21 +598,23 @@ export function Pricing() {
         </div>
         <div className="table-scroll">
           <table>
-            <caption className="sr-only">
-              Perbandingan fitur paket Starter, Pro, dan Business
-            </caption>
+<caption className="sr-only">
+Perbandingan fitur paket Starter, Pro, dan Business
+</caption>
             <thead>
               <tr>
                 <th scope="col">Fitur & kapasitas</th>
-                {plans.map((plan) => (
-                  <th
-                    scope="col"
-                    key={plan.id}
-                    className={plan.id === "pro" ? "pro-column" : ""}
-                  >
-                    {plan.name}
-                  </th>
-                ))}
+                {plans
+                  .filter((plan) => plan.id !== "trial")
+                  .map((plan) => (
+                    <th
+                      scope="col"
+                      key={plan.id}
+                      className={plan.id === "pro" ? "pro-column" : ""}
+                    >
+                      {plan.name}
+                    </th>
+                  ))}
               </tr>
             </thead>
             <tbody>
@@ -367,137 +686,345 @@ export function Pricing() {
         </span>
       </footer>
       <Modal
+        wide
         title={`Tinjau paket ${review?.name ?? ""}`}
-        description="Periksa paket dan identitas pembayar sebelum melanjutkan ke checkout Mayar."
+        description="Konfirmasi paket dan data pembayar. Pembayaran diselesaikan pada halaman aman Mayar."
         open={!!review}
         onOpenChange={() => {
-          if (!checkoutPending) setReview(null);
+          if (!checkoutPending) {
+            setReview(null);
+            stopQrisPolling();
+            setQrisState(null);
+          }
         }}
       >
         {review && (
-          <>
-            <div className="plan-review-summary">
-              <span>
-                {review.name}
-                <small>Langganan bulanan</small>
-              </span>
-              <strong>
-                {money(review.price)}
-                <small>Ditagihkan / bulan</small>
-              </strong>
-            </div>
-            <div className="detail-list">
-              <div>
-                <span>Outlet aktif</span>
-                <strong>Hingga {review.outlets} outlet</strong>
+          <form
+            className="mayar-checkout"
+            onSubmit={paymentTab === "qris" ? generateQris : selectPlan}
+          >
+            <aside className="mayar-order-card">
+              <div className="mayar-provider-label">
+                <span className="mayar-mark">M</span>
+                <span>
+                  <strong>Checkout Mayar</strong>
+                  <small>Gateway pembayaran Indonesia</small>
+                </span>
               </div>
-              <div>
-                <span>Anggota aktif</span>
-                <strong>Hingga {review.members} anggota</strong>
+              <div className="mayar-plan-name">
+                <span>Paket Nusa</span>
+                <strong>{review.name}</strong>
+                <small>{review.description}</small>
               </div>
-              <div>
-                <span>Kuota AI</span>
-                <strong>{number(review.messages)} pesan / bulan</strong>
+              <div className="mayar-price-total">
+                <span>Total pembayaran</span>
+                <strong>{money(review.price)}</strong>
+                <small>Satu bulan · belum diperpanjang otomatis</small>
               </div>
-              <div>
-                <span>Paket saat ini</span>
-                <strong>Trial Pro · sampai 14 Sep 2026</strong>
-              </div>
-            </div>
-            {planNeedsAdjustment(review) && (
-              <div className="plan-capacity-warning">
-                <Info size={18} />
+              <dl className="mayar-order-details">
                 <div>
-                  <strong>Sesuaikan kapasitas sebelum pindah.</strong>
-                  <p>
-                    Bisnis Anda memiliki {activeOutlets} outlet dan{" "}
-                    {activeMembers} anggota aktif. {review.name} mendukung{" "}
-                    {review.outlets} outlet dan {review.members} anggota.
-                    Perubahan ditunda sampai batas terpenuhi; data tidak
-                    dihapus.
-                  </p>
+                  <dt>
+                    <Store size={14} /> Outlet
+                  </dt>
+                  <dd>Hingga {review.outlets}</dd>
                 </div>
+                <div>
+                  <dt>
+                    <Users size={14} /> Anggota
+                  </dt>
+                  <dd>Hingga {review.members}</dd>
+                </div>
+                <div>
+                  <dt>
+                    <Sparkles size={14} /> Nusa AI
+                  </dt>
+                  <dd>{number(review.messages)} pesan</dd>
+                </div>
+              </dl>
+              <div className="mayar-current-plan">
+                <span>Paket saat ini</span>
+                <strong>{state.subscription}</strong>
+                <small>
+                  {subscription?.period_end
+                    ? `Berlaku sampai ${new Date(subscription.period_end).toLocaleDateString("id-ID")}`
+                    : "Periode belum tersedia"}
+                </small>
               </div>
-            )}
-            <div className="info-note">
-              <ShieldCheck size={17} />
-              <span>
-                {planNeedsAdjustment(review)
-                  ? "Pilihan akan ditandai perlu penyesuaian. "
-                  : "Checkout dilanjutkan melalui Mayar. "}
-                Paket aktif berubah setelah pembayaran diverifikasi. Downgrade
-                dijadwalkan pada akhir periode berjalan.
-              </span>
-            </div>
-            {!planNeedsAdjustment(review) && (
-              <div className="ops-form">
-                <label className="field">
-                  Nama pembayar
-                  <input
-                    required
-                    autoComplete="name"
-                    value={billing.name}
-                    onChange={(event) =>
-                      setBilling({ ...billing, name: event.target.value })
-                    }
-                  />
-                </label>
-                <label className="field">
-                  Email pembayar
-                  <input
-                    required
-                    type="email"
-                    autoComplete="email"
-                    value={billing.email}
-                    onChange={(event) =>
-                      setBilling({ ...billing, email: event.target.value })
-                    }
-                  />
-                </label>
-                <label className="field">
-                  Nomor WhatsApp
-                  <input
-                    required
-                    type="tel"
-                    autoComplete="tel"
-                    placeholder="081234567890"
-                    value={billing.mobile}
-                    onChange={(event) =>
-                      setBilling({ ...billing, mobile: event.target.value })
-                    }
-                  />
-                </label>
+            </aside>
+            <div className="mayar-checkout-main">
+              {planNeedsAdjustment(review) ? (
+                <div className="plan-capacity-warning">
+                  <Info size={20} />
+                  <div>
+                    <strong>Kapasitas paket belum mencukupi.</strong>
+                    <p>
+                      Bisnis Anda memiliki {activeOutlets} outlet dan{" "}
+                      {activeMembers} anggota aktif. {review.name} mendukung{" "}
+                      {review.outlets} outlet dan {review.members} anggota.
+                      Nonaktifkan kelebihan outlet atau anggota sebelum membeli
+                      paket ini.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {/* Payment method tabs */}
+                  <div className="payment-tabs">
+                    <button
+                      type="button"
+                      className={`payment-tab${paymentTab === "mayar" ? " active" : ""}`}
+                      onClick={() => {
+                        setPaymentTab("mayar");
+                        setCheckoutError("");
+                        stopQrisPolling();
+                        setQrisState(null);
+                      }}
+                    >
+                      <CreditCard size={15} />
+                      Bayar via Mayar
+                    </button>
+                    <button
+                      type="button"
+                      className={`payment-tab${paymentTab === "qris" ? " active" : ""}`}
+                      onClick={() => {
+                        setPaymentTab("qris");
+                        setCheckoutError("");
+                      }}
+                    >
+                      <QrCode size={15} />
+                      QRIS
+                    </button>
+                  </div>
+
+                  {/* Shared buyer fields */}
+                  <div className="mayar-step-heading">
+                    <span>1</span>
+                    <div>
+                      <strong>Identitas pembayar</strong>
+                      <p>
+                        {paymentTab === "mayar"
+                          ? "Mayar menggunakan data ini untuk invoice dan notifikasi pembayaran."
+                          : "Data ini digunakan untuk membuat invoice yang terhubung dengan pembayaran QRIS."}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mayar-buyer-fields">
+                    <label className="field">
+                      <span>
+                        <UserRound size={15} /> Nama pembayar
+                      </span>
+                      <input
+                        required
+                        minLength={2}
+                        maxLength={100}
+                        autoComplete="name"
+                        placeholder="Nama lengkap"
+                        value={billing.name}
+                        onChange={(event) =>
+                          setBilling({ ...billing, name: event.target.value })
+                        }
+                      />
+                    </label>
+                    <label className="field">
+                      <span>
+                        <Mail size={15} /> Email pembayar
+                      </span>
+                      <input
+                        required
+                        type="email"
+                        maxLength={254}
+                        autoComplete="email"
+                        placeholder="nama@email.com"
+                        value={billing.email}
+                        onChange={(event) =>
+                          setBilling({ ...billing, email: event.target.value })
+                        }
+                      />
+                    </label>
+                    <label className="field mayar-mobile-field">
+                      <span>
+                        <MessageCircle size={15} /> Nomor WhatsApp
+                      </span>
+                      <input
+                        required
+                        type="tel"
+                        minLength={9}
+                        maxLength={20}
+                        pattern="^\+?[0-9]{9,15}$"
+                        autoComplete="tel"
+                        inputMode="tel"
+                        placeholder="0812 3456 7890"
+                        value={billing.mobile}
+                        onChange={(event) =>
+                          setBilling({ ...billing, mobile: event.target.value })
+                        }
+                      />
+                      <small>Gunakan nomor aktif untuk notifikasi Mayar.</small>
+                    </label>
+                  </div>
+
+                  {/* QRIS panel */}
+                  {paymentTab === "qris" && (
+                    <div className="qris-panel">
+                      {!qrisState && (
+                        <div className="qris-intro">
+                          <QrCode size={40} />
+                          <p>
+                            Klik <strong>Tampilkan QR Code</strong> untuk
+                            menghasilkan kode QRIS. Scan dengan aplikasi
+                            m-banking atau e-wallet Anda.
+                          </p>
+                          <small>
+                            Paket aktif otomatis setelah pembayaran terverifikasi
+                            oleh Mayar.
+                          </small>
+                        </div>
+                      )}
+                      {qrisState && qrisState.phase !== "idle" && (
+                        <div className={`qris-display qris-phase-${qrisState.phase}`}>
+                          {(qrisState.phase === "ready" || qrisState.phase === "checking") && (
+                            <>
+                              <div className="qris-image-wrap">
+                                <img
+                                  src={qrisState.qrisImageUrl}
+                                  alt="QR Code QRIS pembayaran"
+                                  width={220}
+                                  height={220}
+                                />
+                                {qrisState.phase === "checking" && (
+                                  <div className="qris-checking-overlay">
+                                    <LoaderCircle className="payment-spin" size={32} />
+                                  </div>
+                                )}
+                              </div>
+                              <div className="qris-info">
+                                <span className="qris-amount">{money(qrisState.amount)}</span>
+                                <p>{qrisState.message}</p>
+                                <small>
+                                  Berlaku sampai{" "}
+                                  {new Date(qrisState.expiresAt).toLocaleTimeString("id-ID", {
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })}
+                                </small>
+                                <div className="qris-actions">
+                                  <LoaderCircle className="payment-spin qris-poll-icon" size={14} />
+                                  <span>Menunggu pembayaran…</span>
+                                  <button
+                                    type="button"
+                                    className="button ghost compact"
+                                    onClick={() => {
+                                      stopQrisPolling();
+                                      setQrisState(null);
+                                      checkoutKeys.current.delete(review.id + "-qris");
+                                    }}
+                                  >
+                                    Ganti QR
+                                  </button>
+                                </div>
+                              </div>
+                            </>
+                          )}
+                          {qrisState.phase === "paid" && (
+                            <div className="qris-success">
+                              <CheckCircle2 size={40} />
+                              <strong>Pembayaran QRIS berhasil!</strong>
+                              <p>{qrisState.message}</p>
+                              <Link className="button primary compact" href="/settings">
+                                Lihat invoice <ArrowRight size={14} />
+                              </Link>
+                            </div>
+                          )}
+                          {(qrisState.phase === "expired" || qrisState.phase === "error") && (
+                            <div className="qris-expired">
+                              <XCircle size={36} />
+                              <p>{qrisState.message}</p>
+                              <button
+                                type="button"
+                                className="button secondary compact"
+                                onClick={() => {
+                                  setQrisState(null);
+                                  checkoutKeys.current.delete(review.id + "-qris");
+                                }}
+                              >
+                                <RefreshCw size={14} /> Buat QR baru
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {paymentTab === "mayar" && (
+                    <div className="mayar-security-note">
+                      <LockKeyhole size={17} />
+                      <span>
+                        Anda akan diarahkan ke checkout Mayar. Nusa tidak
+                        menyimpan PIN, OTP, atau detail metode pembayaran.
+                      </span>
+                    </div>
+                  )}
+                </>
+              )}
+              {checkoutError && (
+                <p className="ops-error mayar-checkout-error" role="alert">
+                  {checkoutError}
+                </p>
+              )}
+              <div className="mayar-checkout-actions">
+                <button
+                  type="button"
+                  className="button secondary"
+                  onClick={() => {
+                    setReview(null);
+                    stopQrisPolling();
+                    setQrisState(null);
+                  }}
+                  disabled={checkoutPending}
+                >
+                  Kembali
+                </button>
+                {paymentTab === "mayar" ? (
+                  <button
+                    className="button primary"
+                    disabled={checkoutPending || planNeedsAdjustment(review)}
+                  >
+                    {checkoutPending ? (
+                      <>
+                        <LoaderCircle className="payment-spin" size={16} />
+                        Menyiapkan checkout…
+                      </>
+                    ) : (
+                      <>
+                        Bayar {money(review.price)}
+                        <ArrowRight size={16} />
+                      </>
+                    )}
+                  </button>
+                ) : (
+                  !qrisState || ["expired", "error"].includes(qrisState.phase) ? (
+                    <button
+                      className="button primary"
+                      disabled={checkoutPending || planNeedsAdjustment(review)}
+                    >
+                      {checkoutPending ? (
+                        <>
+                          <LoaderCircle className="payment-spin" size={16} />
+                          Membuat QR…
+                        </>
+                      ) : (
+                        <>
+                          <QrCode size={16} />
+                          Tampilkan QR Code
+                        </>
+                      )}
+                    </button>
+                  ) : null
+                )}
               </div>
-            )}
-            {checkoutError && (
-              <p className="ops-error" role="alert">
-                {checkoutError}
-              </p>
-            )}
-            <div className="dialog-actions">
-              <button
-                className="button secondary"
-                onClick={() => setReview(null)}
-                disabled={checkoutPending}
-              >
-                Batal
-              </button>
-              <button
-                className="button primary"
-                onClick={selectPlan}
-                disabled={
-                  checkoutPending ||
-                  planNeedsAdjustment(review) ||
-                  !billing.name.trim() ||
-                  !billing.email.trim() ||
-                  !billing.mobile.trim()
-                }
-              >
-                <CreditCard size={16} />
-                {checkoutPending ? "Membuat invoice…" : "Bayar dengan Mayar"}
-              </button>
             </div>
-          </>
+          </form>
         )}
       </Modal>
     </div>

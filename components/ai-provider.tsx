@@ -20,6 +20,12 @@ function useSessionState() {
   const [pending, setPending] = useState(false);
   const [taskInProgressId, setTaskInProgressId] = useState<string | null>(null);
   const [taskErrors, setTaskErrors] = useState<Record<string, string>>({});
+  const [inputTaskInProgressId, setInputTaskInProgressId] = useState<
+    string | null
+  >(null);
+  const [inputTaskErrors, setInputTaskErrors] = useState<
+    Record<string, string>
+  >({});
   const busy = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionKey = business.remote?.tenant?.id
@@ -90,16 +96,15 @@ function useSessionState() {
           ),
       );
       if (addressedTasks.length) tasks = addressedTasks;
-      const canApprove = ["owner", "manager"].includes(
-        String(business.remote?.role || "").toLowerCase(),
-      );
+      const canApprove =
+        String(business.remote?.role || "").toLowerCase() === "owner";
       saveLocalReply(id, next, {
         id: crypto.randomUUID(),
         role: "assistant",
         text: tasks.length
           ? canApprove
             ? `Saya menemukan ${tasks.length} tugas yang menunggu persetujuan. Tinjau rincian dan konfirmasikan tugas yang ingin dijalankan.`
-            : `Saya menemukan ${tasks.length} tugas untuk ditinjau. Role Anda dapat melihat tugas ini, tetapi persetujuan memerlukan Owner atau Manager.`
+            : `Saya menemukan ${tasks.length} tugas untuk ditinjau. Tindakan melalui AI memerlukan Owner / Business Owner.`
           : "Tidak ada tugas yang menunggu persetujuan sesuai perintah dan akses outlet Anda.",
         source: {
           outlet,
@@ -222,6 +227,83 @@ function useSessionState() {
       setTaskInProgressId(null);
     }
   }
+  function replaceInputTask(
+    items: Message[],
+    messageId: string,
+    inputTask: NonNullable<Message["inputTask"]>,
+  ) {
+    return items.map((message) =>
+      message.id === messageId ? { ...message, inputTask } : message,
+    );
+  }
+  async function runInputTask(
+    message: Message,
+    operation: "prepare-input" | "confirm-input",
+    values = message.inputTask?.values || {},
+  ) {
+    const task = message.inputTask;
+    if (!task || inputTaskInProgressId) return;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    setInputTaskInProgressId(task.id);
+    setInputTaskErrors((errors) => ({ ...errors, [task.id]: "" }));
+    try {
+      const response = await fetch("/api/ai", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: operation,
+          id: task.id,
+          commandKey: task.commandKey,
+          action: task.action,
+          values,
+        }),
+        signal: controller.signal,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok)
+        throw new Error(data.error || "Data belum dapat diproses.");
+      const update = (items: Message[]) =>
+        replaceInputTask(items, message.id, data.task);
+      setMessages(update);
+      setConversations((items) =>
+        items.map((conversation) =>
+          conversation.id === activeId
+            ? { ...conversation, messages: update(conversation.messages) }
+            : conversation,
+        ),
+      );
+      if (operation === "confirm-input") {
+        notify(`${data.task.title.replace("Tambah", "")} berhasil disimpan.`);
+        void refresh().catch(() => {
+          setInputTaskErrors((errors) => ({
+            ...errors,
+            [task.id]:
+              "Data tersimpan, tetapi tampilan terbaru belum termuat. Muat ulang halaman.",
+          }));
+        });
+      }
+    } catch (error) {
+      const text =
+        error instanceof DOMException && error.name === "AbortError"
+          ? "Proses terlalu lama. Coba lagi; kunci perintah akan mencegah data ganda."
+          : (error as Error).message || "Data belum dapat diproses.";
+      setInputTaskErrors((errors) => ({ ...errors, [task.id]: text }));
+      notify(text);
+    } finally {
+      window.clearTimeout(timeout);
+      setInputTaskInProgressId(null);
+    }
+  }
+  async function prepareInputTask(
+    message: Message,
+    values: Record<string, string>,
+  ) {
+    await runInputTask(message, "prepare-input", values);
+  }
+  async function confirmInputTask(message: Message) {
+    await runInputTask(message, "confirm-input");
+  }
   useEffect(() => {
     if (!sessionKey) return;
     try {
@@ -247,7 +329,10 @@ function useSessionState() {
     if (
       !sessionKey ||
       activeId === "new" ||
-      !messages.some((message) => message.tasks?.length)
+      !messages.some(
+        (message) =>
+          message.tasks?.length || message.inputTask || message.clarification,
+      )
     )
       return;
     sessionStorage.setItem(
@@ -329,6 +414,10 @@ function useSessionState() {
     taskInProgressId,
     taskErrors,
     confirmTask,
+    inputTaskInProgressId,
+    inputTaskErrors,
+    prepareInputTask,
+    confirmInputTask,
     send,
     newChat,
   };

@@ -12,6 +12,7 @@ import {
 import { liveSummary, liveLowStock, type BusinessState } from "./operations";
 import { plans, demoSubscription } from "./plans";
 import type { AiApprovalTask } from "./ai-tasks";
+import type { AiInputTask } from "./ai-input-actions";
 
 export type ReplyKind =
   "sales" | "stock" | "po" | "correction" | "pricing" | "help";
@@ -30,6 +31,11 @@ export type Message = {
     result?: any;
   };
   tasks?: AiApprovalTask[];
+  inputTask?: AiInputTask;
+  clarification?: {
+    name: string;
+    options: { label: string; prompt: string }[];
+  };
   id: string;
   role: "user" | "assistant";
   text: string;

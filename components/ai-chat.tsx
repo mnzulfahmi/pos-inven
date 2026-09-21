@@ -41,9 +41,11 @@ import {
 } from "@/lib/demo-data";
 import { PeriodSelect } from "./dashboard";
 import { Modal } from "./ui";
+import { Field } from "./operations/shared";
 import { useWorkspace } from "./workspace-context";
 import { useAiSession } from "./ai-provider";
 import type { Message } from "@/lib/demo-agent";
+import type { AiInputField, AiInputTask } from "@/lib/ai-input-actions";
 
 const starters = [
   {
@@ -85,6 +87,264 @@ const starters = [
 function ChartIcon({ size = 20 }: { size?: number }) {
   return <TrendingUp size={size} />;
 }
+
+function inputDisplayValue(field: AiInputField, value: string) {
+  if (!value) return "Belum diisi";
+  const option = field.options?.find((item) => item.value === value);
+  if (option) return option.label;
+  if (field.type === "number" && /harga|biaya/i.test(field.label))
+    return money(Number(value));
+  return value;
+}
+
+function AiInputTaskCard({
+  message,
+  task,
+  busy,
+  error,
+  onPrepare,
+  onConfirm,
+}: {
+  message: Message;
+  task: AiInputTask;
+  busy: boolean;
+  error?: string;
+  onPrepare: (
+    message: Message,
+    values: Record<string, string>,
+  ) => Promise<void>;
+  onConfirm: (message: Message) => Promise<void>;
+}) {
+  const [values, setValues] = useState(task.values);
+  const [modalOpen, setModalOpen] = useState(task.stage === "form");
+  useEffect(() => {
+    setValues(task.values);
+    setModalOpen(task.stage === "form");
+  }, [task]);
+  const updateValue = (name: string, value: string) =>
+    setValues((current) => ({ ...current, [name]: value }));
+  return (
+    <>
+      <section
+        className={`ai-input-card ${task.stage === "completed" ? "is-completed" : ""}`}
+      >
+        <div className="ai-input-heading">
+          <span className="ai-proposal-icon">
+            {task.action === "product" ? (
+              <Package size={18} />
+            ) : (
+              <FileText size={18} />
+            )}
+          </span>
+          <div>
+            <span>FORMULIR NUSA AI</span>
+            <strong>{task.title}</strong>
+          </div>
+          <span className="ai-proposal-status">
+            {task.stage === "completed" ? (
+              <>
+                <Check size={12} /> Tersimpan
+              </>
+            ) : task.stage === "form" ? (
+              "Perlu dilengkapi"
+            ) : (
+              "Perlu konfirmasi"
+            )}
+          </span>
+        </div>
+        <p className="ai-input-description">{task.description}</p>
+        {task.stage === "form" ? (
+          <div className="ai-input-ready">
+            <div>
+              <strong>Lengkapi data sebelum disimpan</strong>
+              <span>
+                Nama dari percakapan sudah dimasukkan. Field lain tetap kosong
+                sampai Anda mengisinya.
+              </span>
+            </div>
+            <button
+              type="button"
+              className="button primary compact"
+              onClick={() => setModalOpen(true)}
+            >
+              Lengkapi data
+            </button>
+          </div>
+        ) : (
+          <>
+            <dl className="ai-input-review">
+              {task.fields.map((field) => (
+                <div key={field.name}>
+                  <dt>{field.label}</dt>
+                  <dd>
+                    {inputDisplayValue(field, task.values[field.name] || "")}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+            {error && (
+              <p className="ai-proposal-error" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="ai-input-actions">
+              <span>
+                <ShieldCheck size={12} /> Server memeriksa role dan data kembali
+              </span>
+              {task.stage === "review" ? (
+                <div>
+                  <button
+                    type="button"
+                    className="button secondary compact"
+                    disabled={busy}
+                    onClick={() => setModalOpen(true)}
+                  >
+                    Ubah data
+                  </button>
+                  <button
+                    type="button"
+                    className="button primary compact"
+                    disabled={busy}
+                    onClick={() => void onConfirm(message)}
+                  >
+                    {busy ? (
+                      <>
+                        <span className="ai-proposal-spinner" /> Menyimpan...
+                      </>
+                    ) : (
+                      "Konfirmasi & simpan"
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <Link href={task.targetHref}>
+                  Buka data <ArrowUpRight size={12} />
+                </Link>
+              )}
+            </div>
+          </>
+        )}
+      </section>
+      <Modal
+        wide={task.action === "product"}
+        open={modalOpen}
+        onOpenChange={setModalOpen}
+        title={task.title}
+        description={task.description}
+      >
+        <form
+          className="ops-form ai-input-modal-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onPrepare(message, values);
+          }}
+        >
+          <div
+            className={
+              task.action === "product"
+                ? "ops-form-grid"
+                : "ai-input-single-grid"
+            }
+          >
+            {task.fields.map((field) => (
+              <Field
+                key={field.name}
+                label={`${field.label}${field.required ? "" : " (opsional)"}`}
+                hint={field.help}
+              >
+                {field.type === "textarea" ? (
+                  <textarea
+                    required={field.required}
+                    value={values[field.name] || ""}
+                    placeholder={field.placeholder}
+                    onChange={(event) =>
+                      updateValue(field.name, event.target.value)
+                    }
+                  />
+                ) : field.type === "select" ? (
+                  <select
+                    required={field.required}
+                    value={values[field.name] || ""}
+                    onChange={(event) =>
+                      updateValue(field.name, event.target.value)
+                    }
+                  >
+                    {field.options?.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    required={field.required}
+                    type={field.type}
+                    list={
+                      field.options?.length
+                        ? `ai-${task.id}-${field.name}`
+                        : undefined
+                    }
+                    min={field.min}
+                    max={field.max}
+                    step={field.step}
+                    value={values[field.name] || ""}
+                    placeholder={field.placeholder}
+                    onChange={(event) => {
+                      const raw = event.target.value;
+                      updateValue(
+                        field.name,
+                        field.type === "number" && /^0\d/.test(raw)
+                          ? String(Number(raw))
+                          : raw,
+                      );
+                    }}
+                  />
+                )}
+                {field.type !== "select" && !!field.options?.length && (
+                  <datalist id={`ai-${task.id}-${field.name}`}>
+                    {field.options.map((option) => (
+                      <option key={option.value} value={option.value} />
+                    ))}
+                  </datalist>
+                )}
+              </Field>
+            ))}
+          </div>
+          {error && (
+            <p className="ai-proposal-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="ai-input-modal-actions">
+            <span>
+              <ShieldCheck size={12} /> {task.requiredRole}
+            </span>
+            <div>
+              <button
+                type="button"
+                className="button secondary"
+                disabled={busy}
+                onClick={() => setModalOpen(false)}
+              >
+                Batal
+              </button>
+              <button className="button primary" disabled={busy}>
+                {busy ? (
+                  <>
+                    <span className="ai-proposal-spinner" /> Memeriksa...
+                  </>
+                ) : (
+                  "Tinjau data"
+                )}
+              </button>
+            </div>
+          </div>
+        </form>
+      </Modal>
+    </>
+  );
+}
+
 export function AiChat({ compact = false }: { compact?: boolean }) {
   return <ChatContent compact={compact} />;
 }
@@ -114,6 +374,10 @@ function ChatContent({ compact }: { compact: boolean }) {
     taskInProgressId,
     taskErrors,
     confirmTask,
+    inputTaskInProgressId,
+    inputTaskErrors,
+    prepareInputTask,
+    confirmInputTask,
     send,
     newChat: resetChat,
   } = useAiSession();
@@ -141,13 +405,17 @@ function ChatContent({ compact }: { compact: boolean }) {
   const summary = getSummary(outlet, period);
   const low = getLowStock(outlet);
   const top = getTopProducts(outlet, period);
-  const openTaskCount = new Set(
+  const approvalTaskCount = new Set(
     messages.flatMap((message) =>
       (message.tasks || [])
         .filter((task) => task.status === "pending")
         .map((task) => task.id),
     ),
   ).size;
+  const inputTaskCount = messages.filter(
+    (message) => message.inputTask && message.inputTask.stage !== "completed",
+  ).length;
+  const openTaskCount = approvalTaskCount + inputTaskCount;
   useEffect(() => {
     if (messages.length === 0) {
       scrollArea.current?.scrollTo({ top: 0, behavior: "instant" });
@@ -584,6 +852,45 @@ function ChatContent({ compact }: { compact: boolean }) {
                           </div>
                         </div>
                       )}
+                      {message.clarification && (
+                        <section className="ai-clarification-card">
+                          <div>
+                            <Info size={18} />
+                            <span>
+                              <strong>
+                                Data “{message.clarification.name}”
+                              </strong>
+                              <small>
+                                Pilih formulir yang ingin digunakan.
+                              </small>
+                            </span>
+                          </div>
+                          <div className="ai-clarification-options">
+                            {message.clarification.options.map((option) => (
+                              <button
+                                type="button"
+                                className="button secondary compact"
+                                disabled={pending}
+                                key={option.prompt}
+                                onClick={() => void send(option.prompt)}
+                              >
+                                {option.label}
+                                <ArrowRight size={14} />
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      )}
+                      {message.inputTask && (
+                        <AiInputTaskCard
+                          message={message}
+                          task={message.inputTask}
+                          busy={inputTaskInProgressId === message.inputTask.id}
+                          error={inputTaskErrors[message.inputTask.id]}
+                          onPrepare={prepareInputTask}
+                          onConfirm={confirmInputTask}
+                        />
+                      )}
                       {!!message.tasks?.length && (
                         <div className="ai-task-list">
                           {message.tasks.map((task) => (
@@ -908,27 +1215,32 @@ function ChatContent({ compact }: { compact: boolean }) {
                               : asOf}
                           </span>
                           <p>
-                            {message.tasks?.length
-                              ? "Tugas diambil dari workspace aktif sesuai role dan akses outlet. Tombol persetujuan memanggil command bisnis yang memeriksa ulang status, versi data, dan izin sebelum melakukan perubahan."
-                              : message.source
-                                ? "Data diambil dari workspace aktif. Penjualan disajikan setelah refund; saran stok memakai saldo, laju penjualan, lead time, stok pengaman, dan PO yang belum diterima."
-                                : message.kind === "pricing"
-                                  ? "Batas paket mengikuti PRD. Harga bersifat ilustratif; pemilihan paket tidak memproses pembayaran atau mengubah langganan."
-                                  : "Data simulasi lokal. Penjualan sebelum pajak; laba kotor = penjualan bersih − HPP. Insight menjelaskan kontribusi yang terlihat, bukan penyebab di luar data."}
+                            {message.inputTask
+                              ? "Form mengikuti struktur data aplikasi. Nilai diperiksa server dan hanya Owner / Business Owner yang dapat mengonfirmasi penyimpanan."
+                              : message.tasks?.length
+                                ? "Tugas diambil dari workspace aktif sesuai role dan akses outlet. Tombol persetujuan memanggil command bisnis yang memeriksa ulang status, versi data, dan izin sebelum melakukan perubahan."
+                                : message.source
+                                  ? "Data diambil dari workspace aktif. Penjualan disajikan setelah refund; saran stok memakai saldo, laju penjualan, lead time, stok pengaman, dan PO yang belum diterima."
+                                  : message.kind === "pricing"
+                                    ? "Batas paket mengikuti PRD. Harga bersifat ilustratif; pemilihan paket tidak memproses pembayaran atau mengubah langganan."
+                                    : "Data simulasi lokal. Penjualan sebelum pajak; laba kotor = penjualan bersih − HPP. Insight menjelaskan kontribusi yang terlihat, bukan penyebab di luar data."}
                           </p>
                           <Link
                             href={
+                              message.inputTask?.targetHref ||
                               message.tasks?.[0]?.targetHref ||
                               (message.kind === "pricing"
                                 ? "/pricing"
                                 : "/dashboard")
                             }
                           >
-                            {message.tasks?.length
-                              ? "Buka halaman tugas"
-                              : message.kind === "pricing"
-                                ? "Bandingkan paket"
-                                : "Buka dashboard sumber"}{" "}
+                            {message.inputTask
+                              ? "Buka halaman data"
+                              : message.tasks?.length
+                                ? "Buka halaman tugas"
+                                : message.kind === "pricing"
+                                  ? "Bandingkan paket"
+                                  : "Buka dashboard sumber"}{" "}
                             <ArrowUpRight size={12} />
                           </Link>
                         </div>

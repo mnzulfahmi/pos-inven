@@ -2,8 +2,29 @@ import "server-only";
 import { cookies } from "next/headers";
 import { createAdminClient } from "@insforge/sdk";
 import { createServerClient } from "@insforge/sdk/ssr";
-export const serverClient = async () =>
-  createServerClient({ cookies: await cookies() });
+
+const BASE_URL = process.env.NEXT_PUBLIC_INSFORGE_URL;
+const ANON_KEY = process.env.NEXT_PUBLIC_INSFORGE_ANON_KEY;
+
+function assertInsForgeConfig(): { baseUrl: string; anonKey: string } {
+  if (!BASE_URL || !ANON_KEY) {
+    throw new Error(
+      "Missing InsForge configuration. " +
+        "Set NEXT_PUBLIC_INSFORGE_URL and NEXT_PUBLIC_INSFORGE_ANON_KEY " +
+        "in your environment variables.",
+    );
+  }
+  return { baseUrl: BASE_URL, anonKey: ANON_KEY };
+}
+
+export const serverClient = async () => {
+  const { baseUrl, anonKey } = assertInsForgeConfig();
+  return createServerClient({
+    baseUrl,
+    anonKey,
+    cookies: await cookies(),
+  });
+};
 export async function rpc(name: string, args: Record<string, unknown> = {}) {
   const client = await serverClient();
   const { data, error } = await client.database.rpc(name, args);

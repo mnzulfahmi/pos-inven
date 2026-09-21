@@ -37,7 +37,7 @@ assert.equal(
 );
 
 const source = fs.readFileSync("lib/mayar.ts", "utf8");
-assert.match(source, /\/hl\/v2\/invoices\/create/);
+assert.match(source, /\/hl\/v2\/payments\/create/);
 assert.match(source, /Authorization: `Bearer/);
 const example = fs.readFileSync(".env.example", "utf8");
 assert.ok(/^MAYAR_API_KEY=\s*$/m.test(example));

@@ -19,6 +19,14 @@ const { freeModel } = load("lib/ai-model.ts");
 const { approvalTaskRequestFor, buildApprovalTasks, proposalReviewRequest } =
   load("lib/ai-tasks.ts");
 const {
+  aiInputCommand,
+  buildAiInputTask,
+  heuristicInputActionForName,
+  implicitInputNameFor,
+  inputActionIntentFor,
+  normalizeAiInputValues,
+} = load("lib/ai-input-actions.ts");
+const {
   factualFallback,
   modelToolCalls,
   plainModelText,
@@ -185,7 +193,11 @@ const approvalTasks = buildApprovalTasks(
   "all",
 );
 assert.equal(approvalTasks.length, 1);
-assert.equal(approvalTasks[0].canApprove, true);
+assert.equal(
+  approvalTasks[0].canApprove,
+  false,
+  "AI approvals are restricted to the business owner",
+);
 assert.equal(approvalTasks[0].payload.version, 2);
 const inventoryTasks = buildApprovalTasks(
   {
@@ -207,7 +219,70 @@ const inventoryTasks = buildApprovalTasks(
 );
 assert.equal(inventoryTasks.length, 1);
 assert.equal(inventoryTasks[0].canApprove, false);
-assert.equal(inventoryTasks[0].requiredRole, "Owner atau Manager");
+assert.equal(inventoryTasks[0].requiredRole, "Owner / Business Owner");
+const supplierIntent = inputActionIntentFor(
+  "Tambahkan pemasok Sumber Makmur telepon: 08123456789 alamat: Jalan Merdeka 10",
+);
+assert.equal(supplierIntent.action, "supplier");
+assert.equal(supplierIntent.values.name, "Sumber Makmur");
+assert.equal(supplierIntent.values.phone, "08123456789");
+assert.equal(supplierIntent.values.address, "Jalan Merdeka 10");
+const vagueSupplier = inputActionIntentFor("add supplier data");
+assert.equal(vagueSupplier.action, "supplier");
+assert.equal(vagueSupplier.values.name, undefined);
+assert.equal(inputActionIntentFor("Berapa jumlah supplier?"), null);
+assert.equal(implicitInputNameFor("Tambahkan Aqua"), "Aqua");
+assert.equal(heuristicInputActionForName("Aqua"), "product");
+assert.equal(implicitInputNameFor("Tambah Asep"), "Asep");
+assert.equal(heuristicInputActionForName("Asep"), "supplier");
+assert.equal(
+  implicitInputNameFor("Tambahkan stok Aqua 10 pcs"),
+  null,
+  "Stock movements must remain in the stock proposal workflow",
+);
+assert.equal(
+  implicitInputNameFor("Buatkan draft PO untuk Aqua"),
+  null,
+  "Purchase requests must remain in the purchase proposal workflow",
+);
+const context = {
+  outlets: [{ id: "adf115c9-7667-451e-a42a-31f925d7868a", name: "Cikedung" }],
+  categories: ["Minuman"],
+  selectedOutletId: "adf115c9-7667-451e-a42a-31f925d7868a",
+};
+const supplierTask = buildAiInputTask(
+  vagueSupplier,
+  context,
+  "e0a797e4-3cf6-455a-900b-0aafdc53c42e",
+  "9ba08836-4017-4f3d-b6cc-a6f8cd07bd1d",
+);
+assert.equal(supplierTask.stage, "form");
+assert.equal(supplierTask.values.phone, "");
+assert.throws(
+  () => normalizeAiInputValues("supplier", supplierTask.values, context),
+  /Nama pemasok wajib diisi/,
+);
+const product = normalizeAiInputValues(
+  "product",
+  {
+    name: "Kopi Susu",
+    category: "Minuman",
+    variantType: "Ukuran",
+    variantValue: "250 ml",
+    sku: "KOPI-250",
+    barcode: "",
+    unit: "botol",
+    price: "15000",
+    cost: "8000",
+    outletId: context.selectedOutletId,
+    minimum: "5",
+  },
+  context,
+);
+assert.equal(product.payload.variant, "Ukuran: 250 ml");
+assert.equal(product.payload.price, 15000);
+assert.equal(product.payload.minimum, 5);
+assert.equal(aiInputCommand("product"), "save-product");
 console.log(
-  "PASS: free-only routing, safe intents, approval tasks, tool-call normalization, factual fallback, and secret-free template",
+  "PASS: free-only routing, structured input forms, owner-only tasks, safe intents, tool-call normalization, factual fallback, and secret-free template",
 );

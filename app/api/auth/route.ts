@@ -2,12 +2,18 @@ import { createAuthActions } from "@insforge/sdk/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 import { failure, sameOrigin, serverClient } from "@/lib/insforge/server";
+
+const BASE_URL = process.env.NEXT_PUBLIC_INSFORGE_URL;
+const ANON_KEY = process.env.NEXT_PUBLIC_INSFORGE_ANON_KEY;
+
 export async function POST(request: NextRequest) {
   try {
     sameOrigin(request);
     const p = await request.json();
     const response = NextResponse.json({ ok: true });
     const auth = createAuthActions({
+      baseUrl: BASE_URL,
+      anonKey: ANON_KEY,
       requestCookies: request.cookies,
       responseCookies: response.cookies,
     });

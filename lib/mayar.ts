@@ -38,7 +38,9 @@ async function mayarRequest(
   const body = await response.json().catch(() => null);
   if (!response.ok) {
     const error = new Error(
-      String(body?.messages || body?.message || "MAYAR_REQUEST_FAILED"),
+      response.status === 401
+        ? "MAYAR_UNAUTHORIZED"
+        : String(body?.messages || body?.message || "MAYAR_REQUEST_FAILED"),
     ) as Error & { statusCode?: number };
     error.statusCode = response.status;
     throw error;
@@ -46,43 +48,40 @@ async function mayarRequest(
   return body;
 }
 
-export type MayarInvoiceInput = {
+export type MayarPaymentInput = {
   name: string;
   email: string;
   mobile: string;
-  redirectUrl: string;
   description: string;
+  redirectUrl: string;
   expiredAt: string;
   amount: number;
   invoiceId: string;
   tenantId: string;
   planId: string;
-  planName: string;
 };
 
-export async function createMayarInvoice(input: MayarInvoiceInput) {
-  const response = await mayarRequest("/hl/v2/invoices/create", {
+// Keep old alias so callers that were renamed can still compile.
+export type MayarInvoiceInput = MayarPaymentInput;
+
+export async function createMayarPayment(input: MayarPaymentInput) {
+  // Use /hl/v2/payments/create (Single Payment Request) instead of
+  // /hl/v2/invoices/create.  Payments support redirectUrl natively and have a
+  // simpler request body with no per-item breakdown or extraData validation
+  // issues.  The hosted Mayar UI at data.link handles the checkout experience.
+  const response = await mayarRequest("/hl/v2/payments/create", {
     method: "POST",
     body: {
-      name: input.name,
+      name: `Langganan Nusa - ${input.name}`,
+      amount: input.amount,
       email: input.email,
       mobile: input.mobile,
-      redirectUrl: input.redirectUrl,
       description: input.description,
+      redirectUrl: input.redirectUrl,
       expiredAt: input.expiredAt,
-      items: [
-        {
-          quantity: 1,
-          rate: input.amount,
-          description: `Langganan Nusa ${input.planName} - 1 bulan`,
-        },
-      ],
       extraData: {
         noCustomer: input.tenantId,
         idProd: input.planId,
-        invoiceId: input.invoiceId,
-        tenantId: input.tenantId,
-        planId: input.planId,
       },
     },
   });
@@ -91,63 +90,50 @@ export async function createMayarInvoice(input: MayarInvoiceInput) {
     !data ||
     typeof data.id !== "string" ||
     typeof data.transactionId !== "string" ||
-    typeof data.link !== "string" ||
-    !data.link.startsWith("https://")
+    typeof data.link !== "string"
   )
     throw new Error("MAYAR_RESPONSE_INVALID");
+  // link may be a full URL or just a slug — normalise to full URL.
+  const paymentUrl = data.link.startsWith("https://")
+    ? data.link
+    : `${apiBase()}/pl/${data.link}`;
   return {
     providerInvoiceId: data.id,
     providerTransactionId: data.transactionId,
-    paymentUrl: data.link,
-    expiresAt:
-      typeof data.expiredAt === "number"
-        ? new Date(data.expiredAt).toISOString()
-        : String(data.expiredAt || input.expiredAt),
+    paymentUrl,
+    expiresAt: input.expiredAt,
   };
 }
 
-export async function findMayarInvoice(email: string, invoiceId: string) {
-  const response = await mayarRequest(
-    `/hl/v2/invoices/filter?email=${encodeURIComponent(email)}&limit=50`,
-  );
-  const rows = Array.isArray(response?.data) ? response.data : [];
-  const row = rows.find(
-    (item: MayarRecord) => item?.extraData?.invoiceId === invoiceId,
-  );
-  if (!row) return null;
-  const id = row.id;
-  const transactionId = row.transactionId;
-  const link = row.link || row.invoiceUrl || row.paymentUrl;
-  if (
-    typeof id !== "string" ||
-    typeof transactionId !== "string" ||
-    typeof link !== "string" ||
-    !link.startsWith("https://")
-  )
-    return null;
-  return {
-    providerInvoiceId: id,
-    providerTransactionId: transactionId,
-    paymentUrl: link,
-    expiresAt:
-      typeof row.expiredAt === "number"
-        ? new Date(row.expiredAt).toISOString()
-        : String(row.expiredAt || ""),
-  };
-}
+// Keep old name as alias so any remaining callers still compile.
+export const createMayarInvoice = createMayarPayment;
 
-export async function getMayarInvoice(providerInvoiceId: string) {
+export async function getMayarPayment(providerInvoiceId: string) {
   const response = await mayarRequest(
-    `/hl/v2/invoices/${encodeURIComponent(providerInvoiceId)}`,
+    `/hl/v2/payments/${encodeURIComponent(providerInvoiceId)}`,
   );
   return response?.data || response;
 }
+
+// Keep old name as alias.
+export const getMayarInvoice = getMayarPayment;
 
 function records(value: unknown): MayarRecord[] {
   if (!value || typeof value !== "object") return [];
   if (Array.isArray(value)) return value.flatMap(records);
   const record = value as MayarRecord;
   return [record, ...Object.values(record).flatMap(records)];
+}
+
+export async function createMayarQris(amount: number): Promise<string> {
+  const response = await mayarRequest("/hl/v1/qrcode/create", {
+    method: "POST",
+    body: { amount },
+  });
+  const url = response?.data?.url;
+  if (typeof url !== "string" || !url.startsWith("https://"))
+    throw new Error("MAYAR_QRIS_RESPONSE_INVALID");
+  return url;
 }
 
 export function isMayarInvoicePaid(invoice: unknown) {

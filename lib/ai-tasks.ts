@@ -57,7 +57,7 @@ export function buildApprovalTasks(
 ): AiApprovalTask[] {
   if (!raw) return [];
   const role = String(raw.role || "").toLowerCase();
-  const canApprove = role === "owner" || role === "manager";
+  const canApprove = role === "owner";
   const productName = (id: string) =>
     products.find((product) => product.id === id)?.name || "Produk";
   const tasks: AiApprovalTask[] = [];
@@ -82,7 +82,7 @@ export function buildApprovalTasks(
         })),
         payload: { id: purchase.id, version: Number(purchase.version) },
         canApprove,
-        requiredRole: "Owner atau Manager",
+        requiredRole: "Owner / Business Owner",
         targetHref: "/purchases",
         status: "pending",
       });
@@ -106,7 +106,7 @@ export function buildApprovalTasks(
         })),
         payload: { id: count.id },
         canApprove,
-        requiredRole: "Owner atau Manager",
+        requiredRole: "Owner / Business Owner",
         targetHref: "/inventory",
         status: "pending",
       });

@@ -9,24 +9,59 @@ import {
 } from "@/lib/insforge/server";
 import {
   assertMayarConfigured,
-  createMayarInvoice,
-  findMayarInvoice,
+  createMayarPayment,
 } from "@/lib/mayar";
 
 export const dynamic = "force-dynamic";
 
 const checkout = z
   .object({
-    planId: z.enum(["starter-v1", "pro-v1", "business-v1"]),
+    planId: z.enum(["starter-v1", "pro-v1", "business-v1", "trial-v1"]),
     name: z.string().trim().min(2).max(100),
     email: z.email(),
     mobile: z
       .string()
       .trim()
-      .regex(/^\+?[0-9][0-9 -]{7,18}[0-9]$/),
+      .regex(/^\+?[0-9]{9,15}$/),
     key: z.uuid(),
   })
   .strict();
+
+async function authenticatedTenant() {
+  const { data, error } = await (await serverClient()).auth.getCurrentUser();
+  if (error || !data?.user) throw new Error("LOGIN_REQUIRED");
+  const session = await rpc("nusa_session");
+  return resolveTenantId(
+    session,
+    (await cookies()).get("nusa_tenant")?.value,
+  );
+}
+
+export async function GET(request: Request) {
+  try {
+    const invoiceId = z.uuid().parse(new URL(request.url).searchParams.get("invoice"));
+    const tenantId = await authenticatedTenant();
+    const snapshot = await rpc("nusa_snapshot", { t: tenantId });
+    const invoice = snapshot.invoices?.find(
+      (item: Record<string, unknown>) => item.id === invoiceId,
+    );
+    if (!invoice) throw new Error("INVOICE_NOT_FOUND");
+    return Response.json(
+      {
+        id: invoice.id,
+        planId: invoice.plan_id,
+        amount: Number(invoice.amount),
+        status: invoice.status,
+        paymentUrl: invoice.payment_url || "",
+        expiresAt: invoice.expires_at || null,
+        paidAt: invoice.paid_at || null,
+      },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (error) {
+    return failure(error);
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -35,13 +70,7 @@ export async function POST(request: Request) {
     const bodyText = await request.text();
     if (bodyText.length > 10_000) throw new Error("REQUEST_TOO_LARGE");
     const input = checkout.parse(JSON.parse(bodyText));
-    const { data, error } = await (await serverClient()).auth.getCurrentUser();
-    if (error || !data?.user) throw new Error("LOGIN_REQUIRED");
-    const session = await rpc("nusa_session");
-    const tenantId = resolveTenantId(
-      session,
-      (await cookies()).get("nusa_tenant")?.value,
-    );
+    const tenantId = await authenticatedTenant();
     const created = await rpc("nusa_command", {
       t: tenantId,
       op: "request-invoice",
@@ -52,31 +81,33 @@ export async function POST(request: Request) {
       t: tenantId,
       p: { invoiceId: created.id },
     });
-    if (invoice.payment_url)
+    if (
+      invoice.payment_url &&
+      (!invoice.expires_at || Date.parse(invoice.expires_at) > Date.now())
+    )
       return Response.json({
         invoiceId: invoice.id,
         checkoutUrl: invoice.payment_url,
+        expiresAt: invoice.expires_at || null,
       });
+    if (invoice.payment_url) throw new Error("PAYMENT_LINK_EXPIRED");
 
     const origin = process.env.NEXT_PUBLIC_APP_URL
       ? new URL(process.env.NEXT_PUBLIC_APP_URL).origin
       : new URL(request.url).origin;
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const remote =
-      (await findMayarInvoice(input.email, invoice.id)) ||
-      (await createMayarInvoice({
-        name: input.name,
-        email: input.email,
-        mobile: input.mobile.replace(/[ -]/g, ""),
-        redirectUrl: `${origin}/settings?billing=1&invoice=${encodeURIComponent(invoice.id)}`,
-        description: `Langganan Nusa ${invoice.planName} selama 1 bulan`,
-        expiredAt: expiresAt,
-        amount: Number(invoice.amount),
-        invoiceId: invoice.id,
-        tenantId,
-        planId: invoice.plan_id,
-        planName: invoice.planName,
-      }));
+    const remote = await createMayarPayment({
+      name: input.name,
+      email: input.email,
+      mobile: input.mobile.replace(/[ -]/g, ""),
+      description: `Langganan Nusa ${invoice.planName} selama 1 bulan`,
+      redirectUrl: `${origin}/pricing?billing=return&invoice=${encodeURIComponent(invoice.id)}`,
+      expiredAt: expiresAt,
+      amount: Number(invoice.amount),
+      invoiceId: invoice.id,
+      tenantId,
+      planId: invoice.plan_id,
+    });
     await rpc("nusa_billing_bind", {
       t: tenantId,
       p: { invoiceId: invoice.id, ...remote },
@@ -84,6 +115,7 @@ export async function POST(request: Request) {
     return Response.json({
       invoiceId: invoice.id,
       checkoutUrl: remote.paymentUrl,
+      expiresAt: remote.expiresAt,
     });
   } catch (error) {
     if (

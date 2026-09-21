@@ -39,27 +39,38 @@ export async function POST(
       return Response.json({ received: true, ignored: true });
 
     const data = payload.data as Record<string, any>;
-    const extraData =
-      data.extraData && typeof data.extraData === "object"
-        ? data.extraData
-        : {};
-    const invoiceId = z.uuid().safeParse(extraData.invoiceId);
+    // Mayar webhook payloads do not include extraData — that field is only
+    // present on the invoice detail response from the Mayar API.  The webhook
+    // uses data.productId as the Mayar invoice ID (providerInvoiceId) and
+    // data.transactionId / data.id as the transaction ID.
+    const providerInvoiceId =
+      typeof data.productId === "string" ? data.productId.trim() : "";
+    const providerTransactionId =
+      typeof data.transactionId === "string"
+        ? data.transactionId.trim()
+        : typeof data.id === "string"
+          ? data.id.trim()
+          : "";
+    if (!providerInvoiceId && !providerTransactionId)
+      return Response.json({ received: true, unmatched: true });
+
     const lookup = await adminRpc("nusa_mayar_lookup", {
       p: {
-        invoiceId: invoiceId.success ? invoiceId.data : "",
-        providerInvoiceId:
-          typeof data.productId === "string" ? data.productId : "",
-        providerTransactionId:
-          typeof data.transactionId === "string"
-            ? data.transactionId
-            : typeof data.id === "string"
-              ? data.id
-              : "",
+        invoiceId: "",
+        providerInvoiceId,
+        providerTransactionId,
       },
     });
     if (!lookup) return Response.json({ received: true, unmatched: true });
 
-    const providerInvoice = await getMayarInvoice(lookup.providerInvoiceId);
+    // Use the provider invoice ID from the lookup record if available;
+    // otherwise fall back to the ID from the webhook payload itself.
+    const resolvedProviderInvoiceId: string =
+      lookup.providerInvoiceId || providerInvoiceId;
+    if (!resolvedProviderInvoiceId)
+      return Response.json({ received: true, unmatched: true });
+
+    const providerInvoice = await getMayarInvoice(resolvedProviderInvoiceId);
     if (!isMayarInvoicePaid(providerInvoice))
       return Response.json({ received: true, pending: true });
     const paidAmount = mayarInvoiceAmount(providerInvoice);
